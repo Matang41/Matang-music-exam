@@ -161,7 +161,7 @@
         <div class="card" style="margin-top: 10vh;">
             <h1><i class="fa-solid fa-shield-halved"></i> Admin Portal</h1>
             <p style="text-align: center; margin-bottom: 24px;">ระบบจัดการและดึงคะแนนสอบ</p>
-            <div class="input-group"><input type="password" id="adminPinInput" class="text-center" placeholder="รหัสผ่านแอดมิน (อย่างน้อย 6 ตัวอักษร)"></div>
+            <div class="input-group"><input type="password" id="adminPinInput" class="text-center" placeholder="รหัสผ่าน (PIN)"></div>
             <button class="btn" onclick="checkAdminLogin()">เข้าสู่ระบบ</button>
         </div>
         <div style="text-align: center; color: #6B7280; text-decoration: underline; cursor: pointer; font-size: 14px;" onclick="switchView('view-student-login')">กลับไปหน้านักเรียน</div>
@@ -752,21 +752,16 @@
         /* ==========================================================
            3. ADMIN DASHBOARD
            ========================================================== */
-        async function checkAdminLogin() {
-            if (!fbAuth) return alert("⚠️ ระบบยืนยันตัวตนโหลดไม่สำเร็จ กรุณาเช็คอินเทอร์เน็ต/ปิดตัวบล็อกโฆษณา แล้วรีเฟรชหน้าใหม่อีกครั้ง");
-            const pwd = document.getElementById('adminPinInput').value;
-            if(!pwd) return alert("กรุณากรอกรหัสผ่าน");
-            showLoading("กำลังตรวจสอบสิทธิ์...", 0);
-            try {
-                await fbAuth.signInWithEmailAndPassword(ADMIN_EMAIL, pwd);
-                switchView('view-admin-dashboard');
-                loadAllDataFromCloud(true);
-            } catch (e) {
-                hideLoading();
-                alert("รหัสผ่านไม่ถูกต้อง หรือยังไม่ได้ตั้งค่าบัญชีแอดมิน (ดูขั้นตอนที่ครูสอน)");
+        function checkAdminLogin() { 
+            if(document.getElementById('adminPinInput').value === config.adminPin) { 
+                switchView('view-admin-dashboard'); 
+                loadAllDataFromCloud(true); 
+            } else {
+                alert("รหัสผ่านไม่ถูกต้อง");
             }
         }
 
+        /* 🚨 โซนล้างข้อมูล 🚨 */
         async function clearAllScores() {
             if(!confirm("⚠️ แน่ใจหรือไม่ว่าต้องการรีเซ็ต 'คะแนน' ของทุกคน?\n(สถิติวิเคราะห์ข้อสอบทั้งหมดจะถูกรีเซ็ตด้วย)")) return;
             students.forEach(s => { s.score = null; s.status = "pending"; s.answersDetail = {}; });
