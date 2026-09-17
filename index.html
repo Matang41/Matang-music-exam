@@ -169,7 +169,12 @@
         <div class="card" style="margin-top: 10vh;">
             <h1><i class="fa-solid fa-shield-halved"></i> Admin Portal</h1>
             <p style="text-align: center; margin-bottom: 24px;">ระบบจัดการและดึงคะแนนสอบ</p>
-            <div class="input-group"><input type="password" id="adminPinInput" class="text-center" placeholder="รหัสผ่านแอดมิน (อย่างน้อย 6 ตัวอักษร)"></div>
+            <div class="input-group">
+                <input type="email" id="adminEmailInput" class="text-center" placeholder="อีเมลแอดมิน (เช่น admin@school.com)">
+            </div>
+            <div class="input-group">
+                <input type="password" id="adminPinInput" class="text-center" placeholder="รหัสผ่านแอดมิน (อย่างน้อย 6 ตัวอักษร)">
+            </div>
             <button class="btn" onclick="checkAdminLogin()">เข้าสู่ระบบ</button>
         </div>
         <div style="text-align: center; color: #6B7280; text-decoration: underline; cursor: pointer; font-size: 14px;" onclick="switchView('view-student-login')">กลับไปหน้านักเรียน</div>
@@ -357,9 +362,6 @@
                 console.warn('⚠️ Firebase SDK โหลดไม่สำเร็จ (เช็คอินเทอร์เน็ต/ตัวบล็อกโฆษณา) — ระบบล็อกอินแอดมินจะใช้ไม่ได้ชั่วคราว');
             }
         } catch (e) { console.warn('⚠️ Firebase init ล้มเหลว:', e); }
-
-        // อีเมลสมมติสำหรับบัญชีแอดมิน (ไม่ต้องมีอยู่จริง แค่ใช้เป็น username ของระบบ)
-        const ADMIN_EMAIL = "admin@examsystem.local";
 
         // คืนค่า query string "?auth=TOKEN" ถ้าแอดมินล็อกอินอยู่ ไม่งั้นคืนค่าว่าง
         async function getAuthQuery() {
@@ -799,19 +801,24 @@
            ========================================================== */
         async function checkAdminLogin() {
             if (!fbAuth) return alert("⚠️ ระบบยืนยันตัวตนโหลดไม่สำเร็จ กรุณาเช็คอินเทอร์เน็ต/ปิดตัวบล็อกโฆษณา แล้วรีเฟรชหน้าใหม่อีกครั้ง");
+            
+            const email = document.getElementById('adminEmailInput').value.trim();
             const pwd = document.getElementById('adminPinInput').value;
-            if(!pwd) return alert("กรุณากรอกรหัสผ่าน");
+            
+            if(!email || !pwd) return alert("กรุณากรอกอีเมลและรหัสผ่านแอดมินให้ครบถ้วน");
+            
             showLoading("กำลังตรวจสอบสิทธิ์...", 0);
             try {
-                await fbAuth.signInWithEmailAndPassword(ADMIN_EMAIL, pwd);
+                await fbAuth.signInWithEmailAndPassword(email, pwd);
                 switchView('view-admin-dashboard');
                 loadAllDataFromCloud(true);
             } catch (e) {
                 hideLoading();
-                alert("รหัสผ่านไม่ถูกต้อง หรือยังไม่ได้ตั้งค่าบัญชีแอดมิน (ดูขั้นตอนที่ครูสอน)");
+                alert("อีเมลหรือรหัสผ่านไม่ถูกต้อง หรือยังไม่ได้สร้างบัญชีแอดมินใน Firebase");
             }
         }
 
+        /* 🚨 โซนล้างข้อมูล 🚨 */
         async function clearAllScores() {
             if(!confirm("⚠️ แน่ใจหรือไม่ว่าต้องการรีเซ็ต 'คะแนน' ของทุกคน?\n(สถิติวิเคราะห์ข้อสอบทั้งหมดจะถูกรีเซ็ตด้วย)")) return;
             students.forEach(s => { s.score = null; s.status = "pending"; s.answersDetail = {}; });
