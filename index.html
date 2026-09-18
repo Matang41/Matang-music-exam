@@ -380,7 +380,7 @@
     <script>
         const FIREBASE_DB_URL = "https://school-exam-b323a-default-rtdb.asia-southeast1.firebasedatabase.app"; 
         const firebaseConfig = {
-            apiKey: "AIzaSyC0-fePKUDHcxNtZoaF1_OpJQzsIL3CDmU", 
+            apiKey: "ใส่ apiKey ของคุณตรงนี้", 
             authDomain: "school-exam-b323a.firebaseapp.com",
             databaseURL: FIREBASE_DB_URL,
             projectId: "school-exam-b323a"
@@ -1125,8 +1125,9 @@
             let added = 0;
             if(importMode === 'student') {
                 const rows = text.split('\n'); 
-                rows.forEach(r => { const cols = r.split('\t'); if(cols.length >= 2) { const i = cols[0].trim(); const n = cols[1].trim(); let rm = cols[2] ? cols[2].trim() : "ไม่ระบุ"; rm = rm.replace(/ม\.ม\./g, 'ม.'); let genPin = Math.floor(1000 + Math.random() * 9000).toString(); if(i&&n&&!students.some(x=>x.id===i)) { students.push({id:i, name:n, room:rm, pin:genPin, score:null, choiceScore:0, subjectiveScore:0, status:"pending", answersDetail:{}}); added++; } } });
-                alert(`เพิ่ม ${added} คน`); await syncStudentsToCloud(); updateRoomFilter(); renderAdminStudentTable();
+                let newPayload = {};
+                rows.forEach(r => { const cols = r.split('\t'); if(cols.length >= 2) { const i = cols[0].trim(); const n = cols[1].trim(); let rm = cols[2] ? cols[2].trim() : "ไม่ระบุ"; rm = rm.replace(/ม\.ม\./g, 'ม.'); let genPin = Math.floor(1000 + Math.random() * 9000).toString(); if(i&&n&&!students.some(x=>x.id===i)) { let newS = {id:i, name:n, room:rm, pin:genPin, score:null, choiceScore:0, subjectiveScore:0, status:"pending", answersDetail:{}}; students.push(newS); newPayload[i] = newS; added++; } } });
+                alert(`เพิ่ม ${added} คน`); await syncStudentsToCloud(newPayload); updateRoomFilter(); renderAdminStudentTable();
             } else if(importMode === 'question') {
                 const raw = text;
                 if (raw.includes('\t')) {
