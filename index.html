@@ -236,10 +236,21 @@
                         
                         <button class="btn btn-purple btn-small" style="background-color: #8B5CF6;" onclick="openGradingModal()"><i class="fa-solid fa-check-double"></i> ตรวจอัตนัย</button>
                         
+                        <!-- 🌟 ปุ่มสำรองข้อมูล และ กู้คืนข้อมูล 🌟 -->
+                        <button class="btn btn-small btn-outline" onclick="document.getElementById('restore-file-input').click()"><i class="fa-solid fa-upload"></i> กู้คืนสำรอง</button>
+                        <button class="btn btn-small" style="background-color: #374151; color: white;" onclick="backupData()"><i class="fa-solid fa-download"></i> สำรองไฟล์</button>
+                        <input type="file" id="restore-file-input" accept=".json" style="display: none;" onchange="handleRestoreFile(event)">
+
+                        <span style="border-left: 1px solid #ccc; height: 24px; margin: 0 5px;"></span>
+
                         <button class="btn btn-small" onclick="openStudentModal()" style="background-color: #10B981;"><i class="fa-solid fa-user-plus"></i> เพิ่ม</button>
                         <button class="btn btn-small" onclick="openImportModal('student')" style="background-color: #6B7280;"><i class="fa-solid fa-users"></i> นำเข้า</button>
                         <button class="btn btn-success btn-small" onclick="exportGeneralCSV()"><i class="fa-solid fa-file-csv"></i> ส่งออก Excel</button>
-                        <button class="btn btn-outline btn-small" onclick="printSubjectiveAnswers()"><i class="fa-solid fa-print"></i> พิมพ์คำตอบ</button>
+                        
+                        <!-- 🌟 ปุ่มส่งออกข้อมูลสำหรับ Teacher OS ตามสั่ง 🌟 -->
+                        <button class="btn btn-purple btn-small" onclick="exportTeacherOS()"><i class="fa-solid fa-file-arrow-down"></i> ส่งออก Teacher OS</button>
+                        
+                        <button class="btn btn-outline btn-small" onclick="printSubjectiveAnswers()"><i class="fa-solid fa-print"></i> พิมพ์คำตอบอัตนัย</button>
                     </div>
                 </div>
                 
@@ -520,11 +531,17 @@
             hideLoading();
         }
 
+        // 🌟 แก้ไขระบบส่งข้อมูล: ใช้ PATCH แทน PUT เพื่อไม่ให้ข้อมูลเด็กที่เพิ่งส่งมาใหม่โดนลบทับ
         async function syncStudentsToCloud() {
             showLoading("กำลังซิงค์ข้อมูลนักเรียน...", 0);
             try {
                 let studentObj = {}; students.forEach(s => studentObj[s.id] = s);
-                await authFetch(FIREBASE_DB_URL + "/examData/students.json", { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(studentObj) });
+                // ใช้คำสั่ง PATCH เพื่ออัปเดตเฉพาะคนที่ครูทำรายการ ข้อมูลคนอื่นจะได้ไม่พัง
+                await authFetch(FIREBASE_DB_URL + "/examData/students.json", { 
+                    method: 'PATCH', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(studentObj) 
+                });
             } catch(e) { console.error(e); }
             hideLoading();
         }
@@ -781,10 +798,70 @@
             }
         }
 
+        /* 🌟 ระบบกู้คืนคะแนนสำหรับเด็กที่ส่งแล้วแต่คะแนนไม่ขึ้น 🌟 */
+        async function recoverScores() {
+            if(!confirm("กู้คืนคะแนนสำหรับเด็กที่ส่งแล้วแต่คะแนนไม่ขึ้น ยืนยันหรือไม่?")) return;
+            showLoading("กำลังซ่อมแซมคะแนน...", 0);
+            let recovered = 0; calcConfig();
+            
+            let updates = {};
+            students.forEach(s => {
+                if ((s.status === "completed" || s.status === "locked") && s.answersDetail && Object.keys(s.answersDetail).length > 0) {
+                    let correct = 0; 
+                    questions.forEach(q => { 
+                        let safeKey = "q_" + q.id.toString().replace(/\./g, '_'); let legacyKey = q.id.toString().replace(/\./g, '');
+                        const ans = s.answersDetail[safeKey] || s.answersDetail[q.id] || s.answersDetail[legacyKey]; 
+                        if (q.type !== 'text' && ans && ans.isCorrect) correct++; 
+                    });
+                    
+                    const newChoiceScore = parseFloat((correct * (config.scorePerChoice || 1)).toFixed(2));
+                    const currentSubjScore = s.subjectiveScore || 0;
+                    const newTotal = newChoiceScore + currentSubjScore;
+
+                    if(s.score !== newTotal || isNaN(s.score) || s.choiceScore !== newChoiceScore) { 
+                        s.choiceScore = newChoiceScore;
+                        s.score = newTotal; 
+                        updates[s.id] = { score: s.score, choiceScore: s.choiceScore };
+                        recovered++; 
+                    }
+                }
+            });
+
+            if (Object.keys(updates).length > 0) {
+                try {
+                    await authFetch(FIREBASE_DB_URL + "/examData/students.json", { 
+                        method: 'PATCH', 
+                        headers: { 'Content-Type': 'application/json' }, 
+                        body: JSON.stringify(updates) 
+                    });
+                } catch(e) {}
+            }
+            
+            hideLoading();
+            alert(`ซ่อมแซมคะแนนสำเร็จ ${recovered} รายการครับ!`); 
+            renderAdminStudentTable(); renderAnalysis();
+        }
+
         async function clearAllScores() {
             if(!confirm("⚠️ แน่ใจหรือไม่ว่าต้องการรีเซ็ต 'คะแนน' ของทุกคน?\n(สถิติวิเคราะห์ข้อสอบทั้งหมดจะถูกรีเซ็ตด้วย)")) return;
-            students.forEach(s => { s.score = null; s.choiceScore = 0; s.subjectiveScore = 0; s.status = "pending"; s.answersDetail = {}; });
-            await syncStudentsToCloud(); renderAdminStudentTable(); renderAnalysis(); alert("รีเซ็ตสำเร็จ");
+            
+            showLoading("กำลังล้างข้อมูล...", 0);
+            let updates = {};
+            students.forEach(s => { 
+                s.score = null; s.choiceScore = 0; s.subjectiveScore = 0; s.status = "pending"; s.answersDetail = {}; 
+                updates[s.id] = { score: null, choiceScore: 0, subjectiveScore: 0, status: "pending", answersDetail: {} };
+            });
+            
+            try {
+                await authFetch(FIREBASE_DB_URL + "/examData/students.json", { 
+                    method: 'PATCH', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(updates) 
+                });
+            } catch(e) {}
+            
+            hideLoading();
+            renderAdminStudentTable(); renderAnalysis(); alert("รีเซ็ตสำเร็จ");
         }
 
         async function clearAllQuestions() {
@@ -817,15 +894,35 @@
             showLoading("อัปเดตขึ้นคลาวด์...", 0);
             const stdData = { id: i, name: n, room: r, pin: p, score: null, choiceScore: 0, subjectiveScore: 0, status: "pending", answersDetail: {} };
             if(edSId) { const s=students.find(x=>x.id===edSId); s.id=i; s.name=n; s.room=r; s.pin=p; } else { if(students.some(x=>x.id===i)) { hideLoading(); return alert('รหัสซ้ำ'); } students.push(stdData); }
-            try { await authFetch(`${FIREBASE_DB_URL}/examData/students/${i}.json`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(stdData) }); } catch(e) {}
+            try { 
+                await authFetch(`${FIREBASE_DB_URL}/examData/students/${i}.json`, { 
+                    method: 'PUT', // บันทึก 1 คนทับของเดิมได้
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(stdData) 
+                }); 
+            } catch(e) {}
             closeModal('student-modal'); renderAdminStudentTable(); hideLoading();
         }
 
         async function generateRandomPins() {
             if(!confirm("⚠️ แน่ใจหรือไม่ที่จะสุ่ม PIN 4 หลักใหม่ให้กับนักเรียนทุกคน?\n(PIN เก่าจะใช้งานไม่ได้ทันที!)")) return;
             showLoading("กำลังสร้างรหัสผ่านใหม่...", 0);
-            students.forEach(s => { s.pin = Math.floor(1000 + Math.random() * 9000).toString(); });
-            await syncStudentsToCloud(); renderAdminStudentTable(); hideLoading();
+            
+            let updates = {};
+            students.forEach(s => { 
+                s.pin = Math.floor(1000 + Math.random() * 9000).toString(); 
+                updates[s.id] = { pin: s.pin };
+            });
+            
+            try {
+                await authFetch(FIREBASE_DB_URL + "/examData/students.json", { 
+                    method: 'PATCH', 
+                    headers: { 'Content-Type': 'application/json' }, 
+                    body: JSON.stringify(updates) 
+                });
+            } catch(e) {}
+            
+            renderAdminStudentTable(); hideLoading();
             alert("✅ สุ่มรหัส PIN ใหม่ให้นักเรียนทุกคนสำเร็จ!");
         }
 
@@ -997,12 +1094,16 @@
         async function saveGrading() {
             if(!confirm("ยืนยันการบันทึกคะแนนอัตนัยทั้งหมด?")) return;
             showLoading("กำลังบันทึกคะแนนรวม...", 0);
-            const inputs = document.querySelectorAll('.grading-input'); const studentUpdates = {};
+            const inputs = document.querySelectorAll('.grading-input'); 
+            const studentUpdates = {};
+            
             inputs.forEach(inp => {
                 const sId = inp.getAttribute('data-student'); const qKey = inp.getAttribute('data-qkey'); const score = parseFloat(inp.value) || 0;
                 if(!studentUpdates[sId]) studentUpdates[sId] = {}; studentUpdates[sId][qKey] = score;
             });
             
+            let databaseUpdates = {};
+
             students.forEach(s => {
                 if(studentUpdates[s.id] && s.answersDetail) {
                     let subjTotal = 0;
@@ -1023,10 +1124,28 @@
                     });
                     s.choiceScore = parseFloat((choiceCorrect * (config.scorePerChoice || 1)).toFixed(2));
                     s.score = s.choiceScore + s.subjectiveScore;
+
+                    // เตรียมอัปเดตเฉพาะเด็กที่มีการให้คะแนน
+                    databaseUpdates[s.id] = {
+                        score: s.score,
+                        choiceScore: s.choiceScore,
+                        subjectiveScore: s.subjectiveScore,
+                        answersDetail: s.answersDetail
+                    };
                 }
             });
             
-            await syncStudentsToCloud(); renderAdminStudentTable(); renderAnalysis(); closeModal('grading-modal'); hideLoading(); alert('บันทึกคะแนนอัตนัย และรวมคะแนนสำเร็จ!');
+            if (Object.keys(databaseUpdates).length > 0) {
+                try {
+                    await authFetch(FIREBASE_DB_URL + "/examData/students.json", { 
+                        method: 'PATCH', 
+                        headers: { 'Content-Type': 'application/json' }, 
+                        body: JSON.stringify(databaseUpdates) 
+                    });
+                } catch(e) {}
+            }
+
+            renderAdminStudentTable(); renderAnalysis(); closeModal('grading-modal'); hideLoading(); alert('บันทึกคะแนนอัตนัย และรวมคะแนนสำเร็จ!');
         }
 
         function renderAdminQuestionTable() {
@@ -1116,7 +1235,57 @@
         }
         async function deleteQuestion(id) { if(confirm('ลบข้อนี้?')) { questions = questions.filter(x=>x.id!==id); calcConfig(); renderAdminQuestionTable(); await saveConfigAndQuestions(); } }
 
-        /* 🌟 ระบบนำเข้าอัจฉริยะ 🌟 */
+        /* 🌟 ระบบสำรองข้อมูลและนำเข้าข้อมูล 🌟 */
+        function backupData() {
+            // สำรองข้อมูลรายชื่อนักเรียนและคำตอบทั้งหมด
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(students, null, 2));
+            const a = document.createElement('a');
+            a.setAttribute("href", dataStr);
+            a.setAttribute("download", `Backup_Students_${config.subjectCode}_${new Date().toISOString().split('T')[0]}.json`);
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+        }
+
+        function handleRestoreFile(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                try {
+                    const importedStudents = JSON.parse(e.target.result);
+                    if (!Array.isArray(importedStudents)) {
+                        alert("รูปแบบไฟล์ไม่ถูกต้อง ต้องเป็นไฟล์ Backup ของรายชื่อนักเรียนเท่านั้นครับ");
+                        return;
+                    }
+                    if (confirm(`พบข้อมูลนักเรียน ${importedStudents.length} รายการ\nการกู้คืนจะนำข้อมูลนี้ไปอัปเดตบน Cloud ด้วย ยืนยันหรือไม่?`)) {
+                        students = importedStudents;
+                        
+                        // ใช้ PATCH เพื่ออัปเดตทั้งหมดโดยไม่ลบคนอื่น
+                        let studentObj = {}; 
+                        students.forEach(s => studentObj[s.id] = s);
+                        
+                        showLoading("กำลังกู้คืนข้อมูลขึ้น Cloud...", 0);
+                        await authFetch(FIREBASE_DB_URL + "/examData/students.json", { 
+                            method: 'PATCH', 
+                            headers: { 'Content-Type': 'application/json' }, 
+                            body: JSON.stringify(studentObj) 
+                        });
+                        
+                        hideLoading();
+                        renderAdminStudentTable();
+                        renderAnalysis();
+                        alert("กู้คืนข้อมูลและอัปเดตขึ้นระบบสำเร็จ!");
+                    }
+                } catch (error) {
+                    alert("เกิดข้อผิดพลาดในการอ่านไฟล์ JSON: " + error.message);
+                }
+                event.target.value = ""; // Reset input
+            };
+            reader.readAsText(file);
+        }
+
         let importMode = '';
         function openImportModal(mode) { importMode = mode; document.getElementById('import-textarea').value = ''; document.getElementById('import-desc-student').style.display = (mode === 'student') ? 'block' : 'none'; document.getElementById('import-desc-question').style.display = (mode === 'question') ? 'block' : 'none'; document.getElementById('import-title').innerText = (mode === 'student') ? 'นำเข้ารายชื่อนักเรียน' : 'นำเข้าข้อสอบ'; document.getElementById('import-modal').style.display = 'flex'; }
         
@@ -1127,7 +1296,22 @@
                 const rows = text.split('\n'); 
                 let newPayload = {};
                 rows.forEach(r => { const cols = r.split('\t'); if(cols.length >= 2) { const i = cols[0].trim(); const n = cols[1].trim(); let rm = cols[2] ? cols[2].trim() : "ไม่ระบุ"; rm = rm.replace(/ม\.ม\./g, 'ม.'); let genPin = Math.floor(1000 + Math.random() * 9000).toString(); if(i&&n&&!students.some(x=>x.id===i)) { let newS = {id:i, name:n, room:rm, pin:genPin, score:null, choiceScore:0, subjectiveScore:0, status:"pending", answersDetail:{}}; students.push(newS); newPayload[i] = newS; added++; } } });
-                alert(`เพิ่ม ${added} คน`); await syncStudentsToCloud(newPayload); updateRoomFilter(); renderAdminStudentTable();
+                alert(`เพิ่ม ${added} คน`); 
+                
+                // ใช้ PATCH อัปเดตเฉพาะคนที่เพิ่งเพิ่มเข้าไป
+                showLoading("กำลังเพิ่มข้อมูลขึ้น Cloud...", 0);
+                if (Object.keys(newPayload).length > 0) {
+                    try {
+                        await authFetch(FIREBASE_DB_URL + "/examData/students.json", { 
+                            method: 'PATCH', 
+                            headers: { 'Content-Type': 'application/json' }, 
+                            body: JSON.stringify(newPayload) 
+                        });
+                    } catch(e) {}
+                }
+                hideLoading();
+
+                updateRoomFilter(); renderAdminStudentTable();
             } else if(importMode === 'question') {
                 const raw = text;
                 if (raw.includes('\t')) {
@@ -1155,21 +1339,54 @@
             closeModal('import-modal');
         }
 
-        function exportGeneralCSV() {
+        function getFilteredStudents() {
             const selectFilter = document.getElementById('room-filter'); const filter = selectFilter ? selectFilter.value : 'all';
             let list = students.filter(s => s.status === 'completed' && s.score !== null && s.score !== undefined && !isNaN(s.score));
             if(filter !== 'all') list = list.filter(s => s.room === filter);
+            return { list, filterName: filter === 'all' ? 'All_Rooms' : filter.replace(/\//g, '-') };
+        }
+
+        // 🌟 ส่งออกข้อมูลในรูปแบบเฉพาะสำหรับ Smart Teacher OS 🌟
+        function exportTeacherOS() {
+            const { list, filterName } = getFilteredStudents();
+            if (list.length === 0) return alert("ไม่มีนักเรียนในห้องที่เลือกส่งข้อสอบเลยครับ");
+
+            const title = `งานจากระบบสอบออนไลน์: ${config.examName}`;
+            const header = "รหัสประจำตัวนักเรียน\tชื่อนักเรียน\tคะแนน";
+            
+            let exportArray = [title, header];
+
+            list.forEach(s => {
+                let finalScore = (s.score !== null && s.score !== undefined && !isNaN(s.score)) ? s.score : 0;
+                exportArray.push(`${s.id}\t${s.name}\t${finalScore}`);
+            });
+
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(exportArray, null, 2));
+            const a = document.createElement('a'); 
+            a.setAttribute("href", dataStr); 
+            a.setAttribute("download", `TeacherOS_${config.subjectCode}_${filterName}.json`); 
+            document.body.appendChild(a); 
+            a.click(); 
+            a.remove();
+        }
+
+        function exportGeneralCSV() {
+            const { list, filterName } = getFilteredStudents();
             if (list.length === 0) return alert("ไม่มีนักเรียนในห้องที่เลือกส่งข้อสอบเลยครับ");
             let csv = "data:text/csv;charset=utf-8,\uFEFFรหัส,ชื่อ-สกุล,ห้อง,คะแนนรวม,คะแนนปรนัย,คะแนนอัตนัย\n";
             list.forEach(s => csv += `${s.id},"${s.name}",${s.room},${s.score},${s.choiceScore||0},${s.subjectiveScore||0}\n`);
-            const a = document.createElement('a'); a.setAttribute("href", encodeURI(csv)); a.setAttribute("download", `Scores_${config.subjectCode}.csv`);
+            const a = document.createElement('a'); a.setAttribute("href", encodeURI(csv)); a.setAttribute("download", `Scores_${config.subjectCode}_${filterName}.csv`);
             document.body.appendChild(a); a.click(); a.remove();
         }
 
+        /* 🌟 ฟังก์ชันพิมพ์คำตอบอัตนัย 2 คอลัมน์ 🌟 */
         function printSubjectiveAnswers() {
-            const selectFilter = document.getElementById('room-filter'); const filter = selectFilter ? selectFilter.value : 'all';
+            const selectFilter = document.getElementById('room-filter');
+            const filter = selectFilter ? selectFilter.value : 'all';
+
             let list = students.filter(s => s.status === 'completed' || s.status === 'locked');
             if(filter !== 'all') list = list.filter(s => s.room === filter);
+
             if(list.length === 0) return alert("ไม่มีข้อมูลนักเรียนที่ส่งข้อสอบในห้องที่เลือก");
 
             const subjQs = questions.filter(q => q.type === 'text');
@@ -1194,20 +1411,41 @@
             `;
 
             list.forEach(s => {
-                html += `<div class="student-block"><div class="student-name">รหัส: ${s.id} | ชื่อ: ${s.name} | ห้อง: ${s.room}</div>`;
+                html += `<div class="student-block">
+                    <div class="student-name">รหัส: ${s.id} | ชื่อ: ${s.name} | ห้อง: ${s.room}</div>`;
+                
                 subjQs.forEach((q, idx) => {
-                    let safeKey = "q_" + q.id.toString().replace(/\./g, '_'); let legacyKey = q.id.toString().replace(/\./g, '');
+                    let safeKey = "q_" + q.id.toString().replace(/\./g, '_'); 
+                    let legacyKey = q.id.toString().replace(/\./g, '');
                     const ans = s.answersDetail && (s.answersDetail[safeKey] || s.answersDetail[q.id] || s.answersDetail[legacyKey]);
+                    
                     let ansText = "- ไม่ได้ตอบ -";
-                    if(ans && ans.pickedText && ans.pickedText.trim().length > 0) { ansText = ans.pickedText; }
-                    html += `<div class="q-block"><div class="q-text">ข้อ ${idx+1}: ${q.q}</div><div class="ans-text">${ansText}</div></div>`;
+                    if(ans && ans.pickedText && ans.pickedText.trim().length > 0) {
+                        ansText = ans.pickedText;
+                    }
+                    
+                    html += `
+                        <div class="q-block">
+                            <div class="q-text">ข้อ ${idx+1}: ${q.q}</div>
+                            <div class="ans-text">${ansText}</div>
+                        </div>
+                    `;
                 });
                 html += `</div>`;
             });
 
             html += `</div></body></html>`;
-            const printWin = window.open('', '', 'width=900,height=700'); printWin.document.open(); printWin.document.write(html); printWin.document.close();
-            setTimeout(() => { printWin.focus(); printWin.print(); printWin.close(); }, 500);
+
+            const printWin = window.open('', '', 'width=900,height=700');
+            printWin.document.open();
+            printWin.document.write(html);
+            printWin.document.close();
+            
+            setTimeout(() => {
+                printWin.focus();
+                printWin.print();
+                printWin.close();
+            }, 500);
         }
 
         function exportAnalysisCSV() {
@@ -1220,7 +1458,7 @@
             let csv = "data:text/csv;charset=utf-8,\uFEFFข้อที่,ความยากง่าย (p),การแปลผล,อำนาจจำแนก (r),การแปลผล\n";
             
             questions.forEach((q, idx) => {
-                if (q.type === 'text') return; 
+                if (q.type === 'text') return; // ข้ามข้อสอบอัตนัย
                 let correctTotal = 0; 
                 doneStds.forEach(s => { 
                     let safeKey = "q_" + q.id.toString().replace(/\./g, '_'); let legacyKey = q.id.toString().replace(/\./g, '');
