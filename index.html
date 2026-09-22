@@ -1706,7 +1706,9 @@
         async function aiRequest(key, model, userText, systemText, wantJson) {
             const body = {
                 contents: [{ role: 'user', parts: [{ text: userText }] }],
-                generationConfig: { temperature: 0, maxOutputTokens: 1200 }
+                // maxOutputTokens สูงพอสำหรับ JSON ที่ยาวได้หลายเกณฑ์ + กันโมเดลรุ่น thinking (flash-latest/3.x) ตัดคำตอบ
+                // thinkingBudget: 0 ปิดการ "คิดก่อนตอบ" เพราะงานให้คะแนนตามรูบริกไม่จำเป็นต้องคิดลึก ทำให้เร็วขึ้นและกิน token น้อยลงด้วย
+                generationConfig: { temperature: 0, maxOutputTokens: 4096, thinkingConfig: { thinkingBudget: 0 } }
             };
             if (systemText) body.systemInstruction = { parts: [{ text: systemText }] };
             if (wantJson) body.generationConfig.responseMimeType = 'application/json';
@@ -1716,10 +1718,13 @@
                 });
                 const data = await res.json().catch(() => null);
                 if (!res.ok) return { ok: false, error: aiErrorText(res.status, data && data.error && data.error.message) };
-                const parts = (data && data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
+                const cand = data && data.candidates && data.candidates[0];
+                const parts = (cand && cand.content && cand.content.parts) || [];
                 const text = parts.map(p => p.text || '').join('').trim();
-                if (!text) return { ok: false, error: 'โมเดลไม่ได้ส่งข้อความกลับมา (อาจถูกกรองเนื้อหา)' };
-                return { ok: true, text };
+                // finishReason: MAX_TOKENS แปลว่าคำตอบถูกตัดกลางคัน (คำตอบยาวเกิน หรือโมเดลนี้ไม่รองรับ thinkingBudget:0)
+                if (cand && cand.finishReason === 'MAX_TOKENS' && !text) return { ok: false, error: 'คำตอบถูกตัดก่อนจบ (โมเดลนี้อาจต้องใช้ token คิดเยอะ) ลองเปลี่ยนไปใช้รุ่น gemini-2.5-flash หรือ gemini-flash-lite-latest แทน' };
+                if (!text) return { ok: false, error: 'โมเดลไม่ได้ส่งข้อความกลับมา (อาจถูกกรองเนื้อหา หรือคำตอบถูกตัดก่อนจบ)' };
+                return { ok: true, text, truncated: cand && cand.finishReason === 'MAX_TOKENS' };
             } catch (e) { return { ok: false, error: 'เชื่อมต่อไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ต' }; }
         }
 
@@ -1920,16 +1925,18 @@
 
             aiBusy = true;
             let done = 0, okCount = 0, errCount = 0, emptyCount = 0, streak = 0;
+            // โควตาฟรีของ Gemini ช่วงนี้ต่ำมาก (อาจเหลือแค่ราว 10 ครั้ง/นาที) เว้นจังหวะให้ปลอดภัยไว้ก่อน
+            let gapMs = 3500;
             showLoading(`กำลังให้ AI ตรวจ 0/${jobs.length} ...`, 0);
             for (const j of jobs) {
                 const r = await aiGradeOne(j.sid, j.qid, true);
                 done++;
-                if (r === 'ok') { okCount++; streak = 0; }
+                if (r === 'ok') { okCount++; streak = 0; gapMs = Math.max(3500, gapMs - 500); }
                 else if (r === 'empty') { emptyCount++; streak = 0; }
-                else { errCount++; streak++; }
-                $('loading-text').innerText = `กำลังให้ AI ตรวจ ${done}/${jobs.length} ...`;
-                if (streak >= 3) break;   // ผิดพลาดติดกัน 3 ครั้ง (เช่นโควตาหมด) หยุดไว้ก่อน
-                await new Promise(r2 => setTimeout(r2, 400));
+                else { errCount++; streak++; gapMs = Math.min(20000, gapMs * 2); }   // เจอ error (มักคือโควตา) → ถอยจังหวะให้ห่างขึ้นเรื่อยๆ
+                $('loading-text').innerText = `กำลังให้ AI ตรวจ ${done}/${jobs.length} (เว้นจังหวะ ${(gapMs / 1000).toFixed(1)} วิ/ครั้ง)`;
+                if (streak >= 3) break;   // ผิดพลาดติดกัน 3 ครั้งแม้ถอยจังหวะแล้ว (เช่นโควตารายวันหมด) หยุดไว้ก่อน
+                await new Promise(r2 => setTimeout(r2, gapMs));
             }
             aiBusy = false; hideLoading();
             const stopped = streak >= 3 ? '\n\n⛔ หยุดกลางคันเพราะเกิดข้อผิดพลาดติดกัน 3 ครั้ง (อาจโควตาหมดหรือเครือข่ายมีปัญหา)' : '';
