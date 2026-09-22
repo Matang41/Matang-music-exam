@@ -514,11 +514,13 @@
             <div style="margin-bottom: 15px; background: #F3F4F6; padding: 15px; border-radius: 12px;">
                 <label style="font-weight:bold; display:block; margin-bottom:5px;">เลือกห้องที่ต้องการตรวจ:</label>
                 <select id="grading-room-filter" onchange="renderGradingList()" style="padding: 10px; border-radius: 10px; border: 2px solid #D1D5DB; width: 100%; font-size: 16px; font-weight: bold; color: var(--primary);"></select>
+                <div id="grading-scope-info" style="font-size:13px; color:#374151; margin-top:8px;"></div>
             </div>
             <div style="margin-bottom: 15px; background: #EEF2FF; border: 1px solid #C7D2FE; padding: 12px 14px; border-radius: 12px;">
                 <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
                     <span style="font-weight:700; color:#3730A3;"><i class="fa-solid fa-robot"></i> ผู้ช่วยตรวจ (AI)</span>
                     <button class="btn btn-blue btn-small" onclick="aiGradeAll()"><i class="fa-solid fa-wand-magic-sparkles"></i> ให้ AI ช่วยตรวจทั้งห้อง</button>
+                    <button class="btn btn-warning btn-small" onclick="aiGradeAll(true)"><i class="fa-solid fa-rotate-right"></i> ตรวจซ้ำเฉพาะที่ error</button>
                     <button class="btn btn-outline btn-small" onclick="applyAllAiScores()"><i class="fa-solid fa-check-double"></i> ใช้คะแนนที่ AI เสนอทั้งหมด</button>
                     <button class="btn btn-outline btn-small" onclick="openAiModal()"><i class="fa-solid fa-key"></i> ตั้งค่า Key</button>
                 </div>
@@ -1549,6 +1551,10 @@
             if (filter !== 'all') list = list.filter(s => s.room === filter);
             list = sortStudents(list);
 
+            const roomLabel = filter === 'all' ? '⚠️ ทุกห้องรวมกัน' : ('ห้อง ' + filter);
+            const scopeEl = $('grading-scope-info');
+            if (scopeEl) scopeEl.innerHTML = `กำลังแสดง: <b>${escapeHtml(roomLabel)}</b> — ${list.length} คน (ส่งแล้ว/ถูกล็อก)${filter === 'all' ? ' <span style="color:#B45309;">ถ้าต้องการตรวจทีละห้อง เลือกห้องด้านบนก่อนกด "ให้ AI ช่วยตรวจทั้งห้อง"</span>' : ''}`;
+
             const subjQs = questions.filter(q => q.type === 'text');
             if (subjQs.length === 0) { $('grading-content').innerHTML = "<p style='text-align:center; padding: 20px;'>ไม่มีข้อสอบแบบอัตนัยในระบบ</p>"; return; }
             if (list.length === 0) { $('grading-content').innerHTML = "<p style='text-align:center; padding: 20px;'>ยังไม่มีนักเรียนที่ส่งข้อสอบในห้องนี้</p>"; return; }
@@ -1728,7 +1734,16 @@
                     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
                 });
                 const data = await res.json().catch(() => null);
-                if (!res.ok) return { ok: false, error: aiErrorText(res.status, data && data.error && data.error.message) };
+                if (!res.ok) {
+                    let retryAfterMs = null;
+                    // Gemini มักแนบเวลาที่ควรรอมาด้วยตอน 429 (google.rpc.RetryInfo.retryDelay เช่น "23s") ใช้ค่านี้แทนการเดาเอง
+                    if (res.status === 429 && data && data.error && Array.isArray(data.error.details)) {
+                        const info = data.error.details.find(d => String(d['@type'] || '').includes('RetryInfo'));
+                        const m = info && String(info.retryDelay || '').match(/([\d.]+)s/);
+                        if (m) retryAfterMs = Math.ceil(parseFloat(m[1]) * 1000);
+                    }
+                    return { ok: false, status: res.status, retryAfterMs, error: aiErrorText(res.status, data && data.error && data.error.message) };
+                }
                 const cand = data && data.candidates && data.candidates[0];
                 const parts = (cand && cand.content && cand.content.parts) || [];
                 const text = parts.map(p => p.text || '').join('').trim();
@@ -1904,28 +1919,62 @@
             });
             return { ok: true, results };
         }
+        // ---- ตัวป้องกันโควตา (429): ใช้ร่วมกันทั้งรอบ "ตรวจทั้งห้อง" หนึ่งครั้ง รีเซ็ตทุกครั้งที่เริ่มรอบใหม่ ----
+        let aiQuotaExhausted = false;
+        let aiQuota429Streak = 0;
+        // เรียก callFn (คืนผลแบบเดียวกับ aiRequest/aiEvaluate*) โดยถ้าเจอ 429 จะรอเวลาที่เซิร์ฟเวอร์แนะนำแล้วลองคำขอเดิมซ้ำ
+        // ถ้าเจอ 429 ติดกัน 3 ครั้ง ถือว่าโควตาหมดจริง จะหยุดยิงคำขอเพิ่มไปเลยตลอดรอบนี้ (กันไม่ให้ยิ่งยิงยิ่งเสีย)
+        async function attemptWithQuotaGuard(callFn, onWait) {
+            if (aiQuotaExhausted) return { ok: false, error: 'ยกเลิกเพราะโควตาหมด/เกินการใช้งานต่อนาที กรุณารอสักครู่แล้วกด "ตรวจซ้ำเฉพาะที่ error"', quotaBlocked: true };
+            const r = await callFn();
+            if (r.ok) { aiQuota429Streak = 0; return r; }
+            if (r.status === 429) {
+                aiQuota429Streak++;
+                if (aiQuota429Streak >= 3) {
+                    aiQuotaExhausted = true;
+                    return { ok: false, error: 'โควตาหมด/เกินการใช้งานต่อนาทีซ้ำหลายครั้ง หยุดไว้ก่อน — รอสักครู่แล้วกด "ตรวจซ้ำเฉพาะที่ error"', quotaBlocked: true };
+                }
+                const wait = r.retryAfterMs || 20000;
+                if (onWait) onWait(wait);
+                await sleep(wait);
+                return attemptWithQuotaGuard(callFn, onWait);   // ลองคำขอเดิมซ้ำ (ไม่หั่นครึ่ง เพราะลดขนาดไม่ช่วยเรื่องโควตา)
+            }
+            return r;   // error อื่นที่ไม่ใช่โควตา (เช่น JSON พัง/ตัดกลางคัน) ให้ผู้เรียกจัดการต่อ (หั่นครึ่ง)
+        }
+
         // ตรวจรายการ items ของคำถามเดียวกัน แบบหั่นครึ่งอัตโนมัติเมื่อชุดใหญ่ล้มเหลว จนถึงฐาน 1 คน/ครั้ง
         // คืน Map(id -> { ok, result }) หรือ Map(id -> { ok:false, error })
-        async function gradeItemsAdaptive(q, items, onProgress) {
+        async function gradeItemsAdaptive(q, items, onProgress, onWait) {
             const out = new Map();
             if (!items.length) return out;
 
+            if (aiQuotaExhausted) {
+                items.forEach(it => out.set(it.id, { ok: false, error: 'ยกเลิกเพราะโควตาหมด/เกินการใช้งานต่อนาที รอสักครู่แล้วกด "ตรวจซ้ำเฉพาะที่ error"' }));
+                if (onProgress) onProgress(items.length);
+                return out;
+            }
+
             if (items.length === 1) {
                 const it = items[0];
-                const r = await aiEvaluateSingleRaw(q, it.text);
+                const r = await attemptWithQuotaGuard(() => aiEvaluateSingleRaw(q, it.text), onWait);
                 out.set(it.id, r.ok ? { ok: true, result: r.result } : { ok: false, error: r.error });
                 if (onProgress) onProgress(1);
                 return out;
             }
 
-            const batchRes = await aiEvaluateBatch(q, items);
+            const batchRes = await attemptWithQuotaGuard(() => aiEvaluateBatch(q, items), onWait);
             if (!batchRes.ok) {
-                // ทั้งชุดล้มเหลว (เช่น ยาวเกิน/พารส์ไม่ได้/โควตา) → หั่นครึ่งแล้วลองใหม่ทีละส่วน
+                if (batchRes.quotaBlocked) {
+                    items.forEach(it => out.set(it.id, { ok: false, error: batchRes.error }));
+                    if (onProgress) onProgress(items.length);
+                    return out;
+                }
+                // ไม่ใช่โควตา (เช่น JSON พัง/ตัดกลางคัน เพราะชุดยาวเกินไป) → หั่นครึ่งแล้วลองใหม่ทีละส่วน
                 const mid = Math.ceil(items.length / 2);
                 const left = items.slice(0, mid), right = items.slice(mid);
-                const leftMap = await gradeItemsAdaptive(q, left, onProgress);
+                const leftMap = await gradeItemsAdaptive(q, left, onProgress, onWait);
                 await sleep(1200);
-                const rightMap = await gradeItemsAdaptive(q, right, onProgress);
+                const rightMap = await gradeItemsAdaptive(q, right, onProgress, onWait);
                 leftMap.forEach((v, k) => out.set(k, v)); rightMap.forEach((v, k) => out.set(k, v));
                 return out;
             }
@@ -1938,10 +1987,13 @@
                 else missing.push(it);
             });
             if (onProgress) onProgress(items.length - missing.length);
-            if (missing.length) {
+            if (missing.length && !aiQuotaExhausted) {
                 await sleep(800);
-                const missingMap = await gradeItemsAdaptive(q, missing, onProgress);
+                const missingMap = await gradeItemsAdaptive(q, missing, onProgress, onWait);
                 missingMap.forEach((v, k) => out.set(k, v));
+            } else if (missing.length) {
+                missing.forEach(it => out.set(it.id, { ok: false, error: 'AI ไม่ได้ส่งผลของรายการนี้กลับมา' }));
+                if (onProgress) onProgress(missing.length);
             }
             return out;
         }
@@ -2017,11 +2069,20 @@
         }
 
         // ตรวจทั้งห้อง: ไล่ทีละข้อสอบ ต่อข้อจะรวมคำตอบหลายคนส่งเป็นชุดเดียวกัน (ประหยัดโควตา) แล้วหั่นครึ่งอัตโนมัติถ้าชุดใหญ่เกินไป
-        async function aiGradeAll() {
+        async function aiGradeAll(onlyErrors = false) {
             if (aiBusy) return;
             if (!getAiKey()) return uiAlert('ยังไม่ได้ตั้งค่า API Key ของผู้ช่วยตรวจ\nกดปุ่ม "ตั้งค่า Key" ก่อนครับ', { tone: 'warning', icon: 'key' });
-            const inputs = Array.from(document.querySelectorAll('.grading-input'));
+            let inputs = Array.from(document.querySelectorAll('.grading-input'));
             if (!inputs.length) return uiAlert('ไม่มีรายการให้ตรวจในหน้านี้');
+
+            if (onlyErrors) {
+                // กรองเฉพาะช่องที่กล่องข้อเสนอ AI กำลังแสดง error อยู่ (ยังไม่ได้ตรวจสำเร็จ)
+                inputs = inputs.filter(i => {
+                    const slot = aiSlotFor(i.getAttribute('data-student'), i.getAttribute('data-qkey'));
+                    return slot && slot.querySelector('.ai-box.err');
+                });
+                if (!inputs.length) return uiAlert('ไม่มีรายการที่ error ในหน้านี้แล้ว');
+            }
 
             const subjQs = questions.filter(q => q.type === 'text');
             // สร้างรายการ "ต้องตรวจ" ต่อข้อสอบ: { s, text } เก็บคำตอบว่างแยกไว้ให้ 0 ทันทีไม่เรียก AI
@@ -2040,19 +2101,29 @@
 
             const totalToGrade = perQuestion.reduce((n, p) => n + p.nonEmpty.length, 0);
             const totalEmpty = perQuestion.reduce((n, p) => n + p.emptyCount, 0);
-            if (!totalToGrade) return uiAlert(totalEmpty ? `ทุกคำตอบในหน้านี้เป็นค่าว่าง ให้ 0 คะแนนแล้ว ${totalEmpty} รายการ` : 'ไม่มีรายการให้ตรวจในหน้านี้');
+            if (!totalToGrade) return uiAlert(totalEmpty ? `ทุกคำตอบในหน้านี้เป็นค่าว่าง ให้ 0 คะแนนแล้ว ${totalEmpty} รายการ` : (onlyErrors ? 'ไม่มีรายการที่ error ในหน้านี้แล้ว' : 'ไม่มีรายการให้ตรวจในหน้านี้'));
+
+            // แสดงขอบเขตให้ชัดก่อนยืนยัน กันพลาดกดตรวจ "ทุกห้องรวมกัน" โดยไม่ได้ตั้งใจ
+            const filterVal = $('grading-room-filter') ? $('grading-room-filter').value : 'all';
+            const roomLabel = filterVal === 'all' ? 'ทุกห้องรวมกัน' : ('ห้อง ' + filterVal);
+            const uniqueStudents = new Set(); perQuestion.forEach(p => p.nonEmpty.forEach(it => uniqueStudents.add(it.sid)));
 
             const batchSize = getAiBatchSize();
             const noRubric = subjQs.filter(q => !(rubrics[safeKeyOf(q)] && rubrics[safeKeyOf(q)].criteria && rubrics[safeKeyOf(q)].criteria.length));
             const warn = noRubric.length ? `\n(มี ${noRubric.length} ข้อที่ยังไม่ได้ใส่รูบริก AI จะใช้ดุลยพินิจตามโจทย์ ซึ่งอาจไม่ตรงใจครู)` : '';
             const callsApprox = perQuestion.reduce((n, p) => n + Math.ceil(p.nonEmpty.length / batchSize), 0);
-            if (!(await uiConfirm(`ให้ AI ช่วยตรวจ ${totalToGrade} คำตอบในหน้านี้ใช่หรือไม่? (ส่งเป็นชุด ชุดละไม่เกิน ${batchSize} คน ≈ ${callsApprox} คำขอ)${warn}\n\nคะแนนจะแสดงเป็นข้อเสนอเท่านั้น ยังไม่ถูกบันทึก`, { title: 'ให้ AI ช่วยตรวจทั้งห้อง', icon: 'robot' }))) return;
+            const scopeMsg = `ขอบเขต: ${roomLabel} — นักเรียน ${uniqueStudents.size} คน`;
+            const actionMsg = onlyErrors ? `ตรวจซ้ำเฉพาะรายการที่ error ${totalToGrade} รายการ` : `ให้ AI ช่วยตรวจ ${totalToGrade} คำตอบ`;
+            if (!(await uiConfirm(`${scopeMsg}\n${actionMsg}ใช่หรือไม่? (ส่งเป็นชุด ชุดละไม่เกิน ${batchSize} คน ≈ ${callsApprox} คำขอ)${warn}\n\nคะแนนจะแสดงเป็นข้อเสนอเท่านั้น ยังไม่ถูกบันทึก`, { title: onlyErrors ? 'ตรวจซ้ำเฉพาะที่ error' : 'ให้ AI ช่วยตรวจทั้งห้อง', icon: 'robot' }))) return;
 
             aiBusy = true;
+            aiQuotaExhausted = false; aiQuota429Streak = 0;   // รีเซ็ตตัวนับโควตาทุกครั้งที่เริ่มรอบใหม่
             let doneItems = 0, okCount = 0, errCount = 0;
             let gapMs = 2000;   // จังหวะพักระหว่างชุด (โควตาฟรีช่วงนี้ต่ำมาก เผื่อไว้ก่อน)
+            const onWait = (ms) => { $('loading-text').innerText = `โดนจำกัดอัตราการใช้งาน (429) — รอ ${(ms / 1000).toFixed(0)} วิ ก่อนลองใหม่...`; };
             showLoading(`กำลังให้ AI ตรวจ 0/${totalToGrade} ...`, 0);
 
+            questionLoop:
             for (const p of perQuestion) {
                 if (!p.nonEmpty.length) continue;
                 // ให้ id ไม่ซ้ำกันตลอดข้อนี้ (กันชนกันตอนหั่นครึ่งแล้วรวมผลกลับ) — ส่งแค่หมายเลข ไม่ส่งรหัส/ชื่อนักเรียน
@@ -2061,20 +2132,21 @@
                     const chunk = items.slice(i, i + batchSize);
                     const resultMap = await gradeItemsAdaptive(p.q, chunk, (n) => {
                         doneItems += n;
-                        $('loading-text').innerText = `กำลังให้ AI ตรวจ ${doneItems}/${totalToGrade} ...`;
-                    });
-                    let chunkOk = 0, chunkErr = 0;
+                        if (!aiQuotaExhausted) $('loading-text').innerText = `กำลังให้ AI ตรวจ ${doneItems}/${totalToGrade} ...`;
+                    }, onWait);
+                    let chunkErr = 0;
                     chunk.forEach(it => {
                         const r = resultMap.get(it.id);
                         if (r && r.ok) {
                             aiSuggestions[it.sid + '|' + p.qkey] = r.result;
                             showAiResult(it.sid, p.qkey, r.result);
-                            okCount++; chunkOk++;
+                            okCount++;
                         } else {
                             renderAiBox(it.sid, p.qkey, `<i class="fa-solid fa-circle-xmark"></i> ${escapeHtml((r && r.error) || 'ไม่ได้รับผลจาก AI')}`, true);
                             errCount++; chunkErr++;
                         }
                     });
+                    if (aiQuotaExhausted) break questionLoop;   // โควตาหมดจริง หยุดทั้งรอบ ไม่ยิงคำขอเพิ่ม
                     gapMs = chunkErr > 0 ? Math.min(15000, gapMs * 1.6) : Math.max(1500, gapMs * 0.8);
                     if (i + batchSize < items.length) await sleep(gapMs);
                 }
@@ -2082,7 +2154,8 @@
             }
 
             aiBusy = false; hideLoading();
-            uiAlert(`AI ตรวจเสร็จแล้ว\n• สำเร็จ ${okCount} รายการ\n• คำตอบว่าง (ให้ 0) ${totalEmpty} รายการ\n• ผิดพลาด ${errCount} รายการ\n\nคะแนนยังไม่ถูกบันทึก กรุณาตรวจทานแล้วกด "บันทึกคะแนนทั้งหมด"`, { tone: okCount ? 'success' : 'warning', icon: okCount ? 'circle-check' : 'triangle-exclamation' });
+            const quotaNote = aiQuotaExhausted ? '\n\n⛔ หยุดก่อนตรวจครบเพราะเกินโควตา/อัตราการใช้งานต่อนาทีซ้ำหลายครั้ง รอสักครู่ (หรือลองใหม่พรุ่งนี้ถ้าเป็นโควตารายวัน) แล้วกด "ตรวจซ้ำเฉพาะที่ error"' : '';
+            uiAlert(`AI ตรวจเสร็จแล้ว\n• สำเร็จ ${okCount} รายการ\n• คำตอบว่าง (ให้ 0) ${totalEmpty} รายการ\n• ผิดพลาด ${errCount} รายการ${quotaNote}\n\nคะแนนยังไม่ถูกบันทึก กรุณาตรวจทานแล้วกด "บันทึกคะแนนทั้งหมด"`, { tone: okCount ? 'success' : 'warning', icon: okCount ? 'circle-check' : 'triangle-exclamation' });
         }
 
 
